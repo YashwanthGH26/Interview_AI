@@ -1,8 +1,7 @@
 import streamlit as st
 import anthropic
-import time
+import io
 import speech_recognition as sr
-import threading
 from datetime import datetime
 
 # ── Page config ──────────────────────────────────────────────────────────────
@@ -12,6 +11,19 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# ── Initialize Session States ─────────────────────────────────────────────────
+if "history" not in st.session_state:
+    st.session_state.history = []
+if "current_response" not in st.session_state:
+    st.session_state.current_response = ""
+
+# Anthropic client initialization safely pulls from secrets or system environment
+# Make sure ANTHROPIC_API_KEY is configured in your local environment or Streamlit Cloud Secrets
+try:
+    client = anthropic.Anthropic()
+except Exception:
+    client = None
 
 # ── Custom CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -306,257 +318,41 @@ html, body, [class*="css"] {
     border: 1px solid rgba(255,107,53,0.3);
     border-radius: 20px;
 }
-.rec-dot {
-    width: 8px; height: 8px;
-    background: var(--warn);
-    border-radius: 50%;
-    animation: pulse 0.8s ease-in-out infinite;
-}
-
-/* ── Tip box ── */
-.tip-box {
-    background: rgba(0,201,255,0.05);
-    border: 1px solid rgba(0,201,255,0.2);
-    border-radius: 10px;
-    padding: 0.8rem 1.1rem;
-    font-size: 0.82rem;
-    color: #7DC8E8;
-    line-height: 1.6;
-}
 </style>
 """, unsafe_allow_html=True)
 
-# ── Session state ─────────────────────────────────────────────────────────────
-if "history" not in st.session_state:
-    st.session_state.history = []
-if "current_answer" not in st.session_state:
-    st.session_state.current_answer = ""
-if "is_generating" not in st.session_state:
-    st.session_state.is_generating = False
-if "question_count" not in st.session_state:
-    st.session_state.question_count = 0
-if "role" not in st.session_state:
-    st.session_state.role = "Software Engineer"
-if "listening" not in st.session_state:
-    st.session_state.listening = False
-if "mic_question" not in st.session_state:
-    st.session_state.mic_question = ""
-
-# ── Hero ──────────────────────────────────────────────────────────────────────
+# ── Hero Layout ──────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="hero">
-    <div class="hero-title">Interview Cracker AI</div>
-    <div class="hero-sub">Real-time answers · Silent mode · Any interview</div>
-    <div style="display:flex;justify-content:center">
-        <div class="live-badge"><div class="live-dot"></div>AI Ready</div>
+    <h1 class="hero-title">INTERVIEW CRACKER AI</h1>
+    <div class="hero-sub">Real-Time Copilot & Technical Response Engine</div>
+    <div class="live-badge">
+        <div class="live-dot"></div> Copilot Pipeline Active
     </div>
 </div>
 """, unsafe_allow_html=True)
 
-# ── Stats row ─────────────────────────────────────────────────────────────────
-st.markdown(f"""
-<div class="stats-row">
-    <div class="stat-pill">Questions answered: <span>{st.session_state.question_count}</span></div>
-    <div class="stat-pill">Role: <span>{st.session_state.role}</span></div>
-    <div class="stat-pill">Mode: <span>Silent Display</span></div>
-</div>
-""", unsafe_allow_html=True)
+# Layout Setup: Left panel for configurations & input, Right panel for output
+col_left, col_right = st.columns([1, 1.2], gap="large")
 
-# ── Layout: two columns ───────────────────────────────────────────────────────
-left, right = st.columns([1, 1.4], gap="large")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# LEFT PANEL — Input
-# ═══════════════════════════════════════════════════════════════════════════════
-with left:
-    st.markdown('<div class="section-label">⚙ Session Setup</div>', unsafe_allow_html=True)
-
-    role_options = [
-        "Software Engineer", "Data Scientist", "Product Manager",
-        "Frontend Developer", "Backend Developer", "DevOps / SRE",
-        "Machine Learning Engineer", "Business Analyst", "UX Designer",
-        "Marketing Manager", "Sales Executive", "Finance Analyst", "Other"
-    ]
-    selected_role = st.selectbox("Job Role / Position", role_options,
-                                  index=role_options.index(st.session_state.role)
-                                  if st.session_state.role in role_options else 0,
-                                  label_visibility="visible")
-    st.session_state.role = selected_role
-
-    experience = st.selectbox("Experience Level", [
-        "Fresher (0–1 yrs)", "Junior (1–3 yrs)",
-        "Mid-level (3–6 yrs)", "Senior (6–10 yrs)", "Lead / Principal (10+ yrs)"
-    ], label_visibility="visible")
-
-    st.markdown("<hr class='custom-divider'>", unsafe_allow_html=True)
-    st.markdown('<div class="section-label">🎙 Interview Question</div>', unsafe_allow_html=True)
-
-    # ── Mic input ──────────────────────────────────────────────────────────
-    col_mic, col_clear = st.columns([1, 1])
-    with col_mic:
-        mic_clicked = st.button("🎙 Record Question", key="mic_btn")
-    with col_clear:
-        st.markdown('<div class="secondary-btn">', unsafe_allow_html=True)
-        clear_clicked = st.button("✕ Clear All", key="clear_btn")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    if mic_clicked:
-        with st.spinner("🎙 Listening for 5 seconds…"):
-            recognizer = sr.Recognizer()
-            try:
-                with sr.Microphone() as source:
-                    recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                    audio = recognizer.listen(source, timeout=5, phrase_time_limit=15)
-                text = recognizer.recognize_google(audio)
-                st.session_state.mic_question = text
-                st.success(f"Heard: **{text}**")
-            except sr.WaitTimeoutError:
-                st.warning("No speech detected. Try again or type the question.")
-            except sr.UnknownValueError:
-                st.warning("Could not understand audio. Try speaking clearly.")
-            except Exception as e:
-                st.warning(f"Mic not available: {e}. Please type the question instead.")
-
-    # ── Text input ─────────────────────────────────────────────────────────
-    default_q = st.session_state.mic_question if st.session_state.mic_question else ""
-    question = st.text_area(
-        "Type or paste the interview question here",
-        value=default_q,
-        height=130,
-        placeholder="e.g. Can you explain the difference between a process and a thread?",
-        label_visibility="visible",
-        key="question_input"
+with col_left:
+    st.markdown('<div class="section-label">System Configurations</div>', unsafe_allow_html=True)
+    
+    # Context Type Selector
+    session_mode = st.selectbox(
+        "Interview Target Profile",
+        ["System Design & Architecture", "LeetCode & Algorithms", "Behavioral (STAR Method)", "General Technical / Core CS"]
     )
-
-    # ── Generate button ────────────────────────────────────────────────────
-    generate_clicked = st.button("⚡ Get Answer Instantly", key="generate_btn")
-
-    st.markdown("<hr class='custom-divider'>", unsafe_allow_html=True)
-    st.markdown("""
-    <div class="tip-box">
-        💡 <strong>Pro tip:</strong> Keep your phone/laptop slightly angled so only you can see the answer.
-        Glance naturally — take a breath, then reply confidently.
+    
+    # Active Stat Indicators
+    st.markdown(f"""
+    <div class="stats-row">
+        <div class="stat-pill">Profile: <span>{session_mode}</span></div>
+        <div class="stat-pill">Logged Queries: <span>{len(st.session_state.history)}</span></div>
     </div>
     """, unsafe_allow_html=True)
-
-    if clear_clicked:
-        st.session_state.history = []
-        st.session_state.current_answer = ""
-        st.session_state.question_count = 0
-        st.session_state.mic_question = ""
-        st.rerun()
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# RIGHT PANEL — Answer display
-# ═══════════════════════════════════════════════════════════════════════════════
-with right:
-    st.markdown('<div class="section-label">💡 AI Answer — Read & Respond</div>', unsafe_allow_html=True)
-
-    answer_placeholder = st.empty()
-    history_placeholder = st.empty()
-
-    # ── Render current answer ──────────────────────────────────────────────
-    def render_answer(text="", streaming=False):
-        if not text:
-            answer_placeholder.markdown("""
-            <div class="answer-wrapper">
-                <div class="answer-header">
-                    <div class="answer-header-left">
-                        <span>▶</span><span>Answer Display</span>
-                    </div>
-                    <span style="color:var(--muted);font-size:0.7rem;font-family:'Space Mono',monospace">WAITING</span>
-                </div>
-                <div class="answer-body">
-                    <span class="answer-placeholder">Your answer will appear here instantly once you submit a question. Keep this screen visible during your interview.</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            cls = "answer-body streaming" if streaming else "answer-body"
-            status = "● STREAMING" if streaming else "✓ READY"
-            sc = "var(--accent)" if not streaming else "var(--warn)"
-            answer_placeholder.markdown(f"""
-            <div class="answer-wrapper">
-                <div class="answer-header">
-                    <div class="answer-header-left">
-                        <span>▶</span><span>Answer Display</span>
-                    </div>
-                    <span style="color:{sc};font-size:0.7rem;font-family:'Space Mono',monospace">{status}</span>
-                </div>
-                <div class="{cls}">{text}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    render_answer(st.session_state.current_answer)
-
-    # ── Generate answer ────────────────────────────────────────────────────
-    if generate_clicked and question.strip():
-        exp_map = {
-            "Fresher (0–1 yrs)": "a fresh graduate with basic knowledge",
-            "Junior (1–3 yrs)": "a junior professional with 1-3 years of experience",
-            "Mid-level (3–6 yrs)": "a mid-level professional with 3-6 years of experience",
-            "Senior (6–10 yrs)": "a senior professional with 6-10 years of experience",
-            "Lead / Principal (10+ yrs)": "a lead/principal-level expert with 10+ years of experience",
-        }
-        exp_desc = exp_map.get(experience, "a professional")
-
-        system_prompt = f"""You are an expert interview coach helping a {exp_desc} applying for a {selected_role} position.
-
-When given an interview question, provide a clear, confident, and impressive answer that:
-1. Directly addresses the question
-2. Uses the STAR method (Situation, Task, Action, Result) for behavioral questions
-3. Includes specific technical details for technical questions
-4. Is concise enough to be spoken in 60-90 seconds
-5. Sounds natural and conversational, not robotic
-
-Format your answer in clean paragraphs. Use bullet points sparingly. Do NOT use markdown headers.
-Start directly with the answer — no preamble like "Great question" or "Certainly"."""
-
-        client = anthropic.Anthropic()
-        full_answer = ""
-        ts = datetime.now().strftime("%H:%M:%S")
-
-        with client.messages.stream(
-            model="claude-sonnet-4-20250514",
-            max_tokens=600,
-            system=system_prompt,
-            messages=[{"role": "user", "content": question.strip()}]
-        ) as stream:
-            for text_chunk in stream.text_stream:
-                full_answer += text_chunk
-                render_answer(full_answer, streaming=True)
-
-        st.session_state.current_answer = full_answer
-        st.session_state.question_count += 1
-        st.session_state.mic_question = ""
-
-        # save to history
-        st.session_state.history.insert(0, {
-            "q": question.strip(),
-            "a": full_answer,
-            "time": ts,
-            "role": selected_role,
-        })
-
-        render_answer(full_answer, streaming=False)
-
-    elif generate_clicked and not question.strip():
-        st.warning("Please enter or record a question first.")
-
-    # ── History ────────────────────────────────────────────────────────────
-    if st.session_state.history:
-        st.markdown("<hr class='custom-divider'>", unsafe_allow_html=True)
-        st.markdown(f'<div class="section-label">📋 Session History ({len(st.session_state.history)} questions)</div>', unsafe_allow_html=True)
-
-        for i, item in enumerate(st.session_state.history[:8]):
-            short_a = item["a"][:200] + "…" if len(item["a"]) > 200 else item["a"]
-            st.markdown(f"""
-            <div class="history-item">
-                <div class="history-q">
-                    <span style="color:var(--muted);font-family:'Space Mono',monospace;font-size:0.7rem;min-width:20px">Q{len(st.session_state.history)-i}</span>
-                    {item["q"]}
-                </div>
-                <div class="history-a">{short_a}</div>
-                <div class="history-time">🕐 {item["time"]} · {item["role"]}</div>
-            </div>
-            """, unsafe_allow_html=True)
+    
+    st.markdown('<div class="section-label">Audio Capture Device</div>', unsafe_allow_html=True)
+    
+    # ── New Cross-Platform Browser Audio Recorder ──
+    # This renders an interactive microphone directly inside the user's web browser
